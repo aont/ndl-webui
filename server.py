@@ -170,6 +170,8 @@ async def stream_progress(request):
     if not state:
         return web.Response(status=404, text="Invalid job ID")
 
+    origin = request.headers.get("Origin")
+
     response = web.StreamResponse(
         status=200,
         reason="OK",
@@ -179,6 +181,9 @@ async def stream_progress(request):
             "Connection": "keep-alive",
         },
     )
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
     await response.prepare(request)
 
     last_payload = None
