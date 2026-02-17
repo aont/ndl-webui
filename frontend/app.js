@@ -1,6 +1,10 @@
 let currentJobId = null;
 let pollInterval = null;
 
+function debugLog(...args) {
+    console.debug("[ndl-webui]", ...args);
+}
+
 const BACKEND_STORAGE_KEY = "backendBaseUri";
 
 
@@ -79,19 +83,24 @@ document.getElementById("startBtn").onclick = async () => {
 
     saveBackendBaseUri();
 
-    const resp = await fetch(buildApiUrl("/start"), {
+    const startUrl = buildApiUrl("/start");
+    debugLog("Starting job request", { startUrl, payload: parsed });
+
+    const resp = await fetch(startUrl, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(parsed)
     });
 
     const data = await resp.json();
+    debugLog("Start response", { status: resp.status, data });
     currentJobId = data.job_id;
 
     document.getElementById("progressSection").style.display = "block";
     document.getElementById("downloadSection").style.display = "none";
 
     pollInterval = setInterval(pollProgress, 1000);
+    debugLog("Polling started", { currentJobId });
 };
 
 /* ----------------------------------------
@@ -99,8 +108,12 @@ document.getElementById("startBtn").onclick = async () => {
 ---------------------------------------- */
 
 async function pollProgress() {
-    const resp = await fetch(buildApiUrl(`/progress/${currentJobId}`));
+    const progressUrl = buildApiUrl(`/progress/${currentJobId}`);
+    debugLog("Polling progress", { progressUrl, currentJobId });
+
+    const resp = await fetch(progressUrl);
     const data = await resp.json();
+    debugLog("Progress response", { status: resp.status, data });
 
     const percent = data.total
         ? (data.progress / data.total) * 100
@@ -112,6 +125,13 @@ async function pollProgress() {
 
     document.getElementById("logOutput").innerText =
         data.logs.join("\n");
+
+    if (data.error) {
+        clearInterval(pollInterval);
+        document.getElementById("progressText").innerText = `Job failed: ${data.error}`;
+        debugLog("Job failed", { data });
+        return;
+    }
 
     if (data.done) {
         clearInterval(pollInterval);
@@ -127,13 +147,20 @@ async function fetchZipIntoMemory() {
     document.getElementById("progressText").innerText =
         "Downloading ZIP into memory...";
 
-    const resp = await fetch(buildApiUrl(`/download/${currentJobId}`));
+    const downloadUrl = buildApiUrl(`/download/${currentJobId}`);
+    debugLog("Fetching ZIP", { downloadUrl, currentJobId });
+
+    const resp = await fetch(downloadUrl);
+    debugLog("Download response", { status: resp.status, ok: resp.ok });
     if (!resp.ok) {
-        alert("Failed to download ZIP");
+        const errorText = `Failed to download ZIP (status=${resp.status})`;
+        alert(errorText);
+        document.getElementById("progressText").innerText = errorText;
         return;
     }
 
     const blob = await resp.blob();
+    debugLog("ZIP blob received", { size: blob.size, type: blob.type });
 
     const blobUrl = URL.createObjectURL(blob);
 

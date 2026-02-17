@@ -51,6 +51,7 @@ class JobState:
         self.total = 0
         self.logs = []
         self.done = False
+        self.error = None
         self.zip_data = None
 
     def log(self, message):
@@ -60,68 +61,75 @@ class JobState:
 
 async def process_job(job_id, payload):
     state = jobs[job_id]
+    try:
+        cookie = payload["Cookie"]
+        base_url = payload["BaseURL"]
+        tracks = payload["PlayListsTracks"]
 
-    cookie = payload["Cookie"]
-    base_url = payload["BaseURL"]
-    tracks = payload["PlayListsTracks"]
+        state.total = len(tracks)
+        state.log(f"Starting job {job_id} with {state.total} tracks")
 
-    state.total = len(tracks)
-    state.log(f"Starting job with {state.total} tracks")
+        zip_buffer = io.BytesIO()
 
-    zip_buffer = io.BytesIO()
+        async with aiohttp.ClientSession() as session:
+            with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_STORED) as zf:
+                for i, track in enumerate(tracks):
+                    track_num = i + 1
+                    state.log(f"Downloading track {track_num}/{state.total}")
 
-    async with aiohttp.ClientSession() as session:
-        with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_STORED) as zf:
-            for i, track in enumerate(tracks):
-                track_num = i + 1
-                state.log(f"Downloading track {track_num}/{state.total}")
+                    m4a_path = track["m4a"]
+                    match = mp4_fn_pat.search(m4a_path)
+                    if not match:
+                        state.log(f"Invalid m4a path: {m4a_path}")
+                        continue
 
-                m4a_path = track["m4a"]
-                match = mp4_fn_pat.search(m4a_path)
-                if not match:
-                    state.log("Invalid m4a path")
-                    continue
+                    filename = match.group(1) + ".m4a"
+                    url = base_url + m4a_path
 
-                filename = match.group(1) + ".m4a"
-                url = base_url + m4a_path
+                    headers = {"Cookie": cookie}
+                    state.log(f"Fetching URL: {url}")
+                    async with session.get(url, headers=headers) as resp:
+                        state.log(f"Track response status={resp.status} for {filename}")
+                        data = await resp.read()
+                        state.log(f"Fetched bytes={len(data)} for {filename}")
 
-                headers = {"Cookie": cookie}
-                async with session.get(url, headers=headers) as resp:
-                    data = await resp.read()
+                    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".m4a")
+                    temp.write(data)
+                    temp.close()
 
-                temp = tempfile.NamedTemporaryFile(delete=False, suffix=".m4a")
-                temp.write(data)
-                temp.close()
+                    state.log(f"Tagging {filename}")
 
-                state.log(f"Tagging {filename}")
+                    audio = mutagen.mp4.MP4(temp.name)
 
-                audio = mutagen.mp4.MP4(temp.name)
+                    track_title = track["workName"] + " - " + track["title"]
+                    audio["\xa9nam"] = [track_title]
+                    audio["\xa9ART"] = [track["artist"]]
 
-                track_title = track["workName"] + " - " + track["title"]
-                audio["\xa9nam"] = [track_title]
-                audio["\xa9ART"] = [track["artist"]]
+                    album = track["album"]
+                    match_album = catalogname_pat.match(album["cataloguename"])
+                    album_title = match_album.group(1)
+                    album_artist = match_album.group(2)
 
-                album = track["album"]
-                match_album = catalogname_pat.match(album["cataloguename"])
-                album_title = match_album.group(1)
-                album_artist = match_album.group(2)
+                    audio["\xa9alb"] = [album_title]
+                    audio["aART"] = [album_artist]
+                    audio["trkn"] = [(track_num, state.total)]
 
-                audio["\xa9alb"] = [album_title]
-                audio["aART"] = [album_artist]
-                audio["trkn"] = [(track_num, state.total)]
+                    audio.save()
 
-                audio.save()
+                    zf.write(temp.name, arcname=filename)
+                    os.remove(temp.name)
 
-                zf.write(temp.name, arcname=filename)
-                os.remove(temp.name)
+                    state.progress = track_num
+                    state.log(f"Finished {filename}")
 
-                state.progress = track_num
-                state.log(f"Finished {filename}")
-
-    zip_buffer.seek(0)
-    state.zip_data = zip_buffer.read()
-    state.done = True
-    state.log("Job completed successfully")
+        zip_buffer.seek(0)
+        state.zip_data = zip_buffer.read()
+        state.done = True
+        state.log(f"Job completed successfully (zip bytes={len(state.zip_data)})")
+    except Exception as exc:
+        state.error = str(exc)
+        state.log(f"Job failed: {exc}")
+        logging.exception("Unhandled exception during job %s", job_id)
 
 
 async def start_job(request):
@@ -129,6 +137,7 @@ async def start_job(request):
     job_id = str(uuid.uuid4())
 
     jobs[job_id] = JobState()
+    logging.info("Received /start request, assigned job_id=%s", job_id)
 
     asyncio.create_task(process_job(job_id, payload))
 
@@ -146,6 +155,9 @@ async def get_progress(request):
         "progress": state.progress,
         "total": state.total,
         "done": state.done,
+        "error": state.error,
+        "zip_ready": state.zip_data is not None,
+        "zip_size": len(state.zip_data) if state.zip_data else 0,
         "logs": state.logs[-20:]
     })
 
@@ -154,8 +166,19 @@ async def download_zip(request):
     job_id = request.match_info["job_id"]
     state = jobs.get(job_id)
 
-    if not state or not state.done:
+    if not state:
+        logging.warning("Download requested for invalid job_id=%s", job_id)
         return web.Response(status=404)
+
+    if not state.done:
+        logging.warning("Download requested before job completion: job_id=%s", job_id)
+        return web.Response(status=404)
+
+    if not state.zip_data:
+        logging.error("Download requested but zip_data missing: job_id=%s error=%s", job_id, state.error)
+        return web.Response(status=404)
+
+    logging.info("Serving ZIP for job_id=%s size=%d", job_id, len(state.zip_data))
 
     return web.Response(
         body=state.zip_data,
@@ -174,11 +197,18 @@ def parse_args():
         default=8080,
         help="Port number for backend server"
     )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level"
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    logging.getLogger().setLevel(getattr(logging, args.log_level))
 
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_post("/start", start_job)
