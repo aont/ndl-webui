@@ -1,7 +1,7 @@
 body {
     font-family: sans-serif;
     padding: 30px;
-    background: #f5f5f5;
+    background: #fff;
 }
 
 textarea {
@@ -21,6 +21,11 @@ pre {
     padding: 10px;
     height: 200px;
     overflow-y: scroll;
+}
+
+#logOutput {
+    background: #f3f3f3;
+    color: #222;
 }
 
 
