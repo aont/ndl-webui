@@ -1,5 +1,5 @@
 let currentJobId = null;
-let pollInterval = null;
+let progressEventSource = null;
 
 function debugLog(...args) {
     console.debug("[ndl-webui]", ...args);
@@ -99,22 +99,35 @@ document.getElementById("startBtn").onclick = async () => {
     document.getElementById("progressSection").style.display = "block";
     document.getElementById("downloadSection").style.display = "none";
 
-    pollInterval = setInterval(pollProgress, 1000);
-    debugLog("Polling started", { currentJobId });
+    subscribeProgressStream();
 };
 
 /* ----------------------------------------
-   Poll progress
+   Progress stream (SSE)
 ---------------------------------------- */
 
-async function pollProgress() {
-    const progressUrl = buildApiUrl(`/progress/${currentJobId}`);
-    debugLog("Polling progress", { progressUrl, currentJobId });
+function subscribeProgressStream() {
+    if (progressEventSource) {
+        progressEventSource.close();
+    }
 
-    const resp = await fetch(progressUrl);
-    const data = await resp.json();
-    debugLog("Progress response", { status: resp.status, data });
+    const progressStreamUrl = buildApiUrl(`/progress-stream/${currentJobId}`);
+    debugLog("Subscribing progress stream", { progressStreamUrl, currentJobId });
 
+    progressEventSource = new EventSource(progressStreamUrl);
+
+    progressEventSource.addEventListener("progress", (event) => {
+        const data = JSON.parse(event.data);
+        debugLog("Progress stream event", data);
+        updateProgressUI(data);
+    });
+
+    progressEventSource.onerror = (error) => {
+        debugLog("Progress stream error", error);
+    };
+}
+
+function updateProgressUI(data) {
     const percent = data.total
         ? (data.progress / data.total) * 100
         : 0;
@@ -127,14 +140,20 @@ async function pollProgress() {
         data.logs.join("\n");
 
     if (data.error) {
-        clearInterval(pollInterval);
+        if (progressEventSource) {
+            progressEventSource.close();
+            progressEventSource = null;
+        }
         document.getElementById("progressText").innerText = `Job failed: ${data.error}`;
         debugLog("Job failed", { data });
         return;
     }
 
     if (data.done) {
-        clearInterval(pollInterval);
+        if (progressEventSource) {
+            progressEventSource.close();
+            progressEventSource = null;
+        }
         showDownloadLink();
     }
 }

@@ -44,7 +44,6 @@ async def cors_middleware(request, handler):
     return response
 
 
-
 class JobState:
     def __init__(self):
         self.progress = 0
@@ -53,6 +52,17 @@ class JobState:
         self.done = False
         self.error = None
         self.zip_data = None
+
+    def snapshot(self):
+        return {
+            "progress": self.progress,
+            "total": self.total,
+            "done": self.done,
+            "error": self.error,
+            "zip_ready": self.zip_data is not None,
+            "zip_size": len(self.zip_data) if self.zip_data else 0,
+            "logs": self.logs[-20:],
+        }
 
     def log(self, message):
         logging.info(message)
@@ -151,15 +161,47 @@ async def get_progress(request):
     if not state:
         return web.json_response({"error": "Invalid job ID"}, status=404)
 
-    return web.json_response({
-        "progress": state.progress,
-        "total": state.total,
-        "done": state.done,
-        "error": state.error,
-        "zip_ready": state.zip_data is not None,
-        "zip_size": len(state.zip_data) if state.zip_data else 0,
-        "logs": state.logs[-20:]
-    })
+    return web.json_response(state.snapshot())
+
+
+async def stream_progress(request):
+    job_id = request.match_info["job_id"]
+    state = jobs.get(job_id)
+    if not state:
+        return web.Response(status=404, text="Invalid job ID")
+
+    response = web.StreamResponse(
+        status=200,
+        reason="OK",
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+    await response.prepare(request)
+
+    last_payload = None
+    try:
+        while True:
+            payload = json.dumps(state.snapshot(), ensure_ascii=False)
+            if payload != last_payload:
+                await response.write(f"event: progress\ndata: {payload}\n\n".encode("utf-8"))
+                last_payload = payload
+
+            if state.done or state.error:
+                break
+
+            await asyncio.sleep(1)
+    except (ConnectionResetError, asyncio.CancelledError):
+        logging.info("SSE connection closed for job_id=%s", job_id)
+    finally:
+        try:
+            await response.write_eof()
+        except ConnectionResetError:
+            pass
+
+    return response
 
 
 async def download_zip(request):
@@ -195,7 +237,7 @@ def parse_args():
         "--port",
         type=int,
         default=8080,
-        help="Port number for backend server"
+        help="Port number for this server"
     )
     parser.add_argument(
         "--log-level",
@@ -213,6 +255,7 @@ def main():
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_post("/start", start_job)
     app.router.add_get("/progress/{job_id}", get_progress)
+    app.router.add_get("/progress-stream/{job_id}", stream_progress)
     app.router.add_get("/download/{job_id}", download_zip)
     app.router.add_static("/", path="./frontend", show_index=True)
 
