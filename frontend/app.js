@@ -1,5 +1,6 @@
 let currentJobId = null;
 let progressEventSource = null;
+let latestLogRefreshRequestId = 0;
 
 function debugLog(...args) {
     console.debug("[ndl-webui]", ...args);
@@ -172,8 +173,8 @@ function updateProgressUI(data) {
             `Progress: ${data.progress} / ${data.total} (uploaded: ${data.uploaded || 0})`;
     }
 
-    document.getElementById("logOutput").innerText =
-        (data.logs || []).join("\n");
+    renderCurrentJobLogs(data.logs || []);
+    refreshAllJobLogs();
 
     if (data.error) {
         if (progressEventSource) {
@@ -198,6 +199,39 @@ function updateProgressUI(data) {
     }
 }
 
+function renderCurrentJobLogs(logs) {
+    document.getElementById("logOutput").innerText = logs.join("\n");
+}
+
+function buildCombinedLogs(jobs) {
+    return jobs.flatMap((job) =>
+        (job.logs || []).map((message) => `[${job.job_id}] ${message}`)
+    );
+}
+
+async function refreshAllJobLogs() {
+    const requestId = ++latestLogRefreshRequestId;
+
+    try {
+        const jobsResp = await fetch(buildApiUrl("/jobs"));
+        if (!jobsResp.ok) {
+            return;
+        }
+
+        const jobsData = await jobsResp.json();
+        if (requestId !== latestLogRefreshRequestId) {
+            return;
+        }
+
+        const combinedLogs = buildCombinedLogs(jobsData.jobs || []);
+        if (combinedLogs.length > 0) {
+            document.getElementById("logOutput").innerText = combinedLogs.join("\n");
+        }
+    } catch (error) {
+        debugLog("Failed to refresh all job logs", error);
+    }
+}
+
 async function hydrateJobFromServer(jobId) {
     const progressUrl = buildApiUrl(`/progress/${jobId}`);
     const resp = await fetch(progressUrl);
@@ -218,6 +252,7 @@ async function resumeLatestJob() {
         try {
             const data = await hydrateJobFromServer(savedJobId);
             updateProgressUI(data);
+            refreshAllJobLogs();
             if (!data.done && !data.error) {
                 subscribeProgressStream();
             }
@@ -245,6 +280,7 @@ async function resumeLatestJob() {
         saveActiveJobId(currentJobId);
         document.getElementById("progressSection").style.display = "block";
         updateProgressUI(activeJob);
+        refreshAllJobLogs();
         subscribeProgressStream();
     } catch (error) {
         debugLog("Failed to hydrate latest jobs list", error);
