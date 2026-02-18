@@ -279,7 +279,7 @@ def parse_args():
     )
     parser.add_argument(
         "--ytmusic-browser-auth",
-        default=None,
+        default="browser.json",
         help="Path to ytmusicapi browser.json auth file"
     )
     return parser.parse_args()
