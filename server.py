@@ -87,6 +87,8 @@ async def process_job(job_id, payload):
         cookie = payload["Cookie"]
         base_url = payload["BaseURL"]
         tracks = payload["PlayListsTracks"]
+        album_art_url = payload.get("AlbumArt")
+        album_art_cover = None
 
         state.total = len(tracks)
         state.log(f"Starting job {job_id} with {state.total} tracks")
@@ -95,6 +97,21 @@ async def process_job(job_id, payload):
         ytmusic = await asyncio.to_thread(YTMusic, ytmusic_auth_path)
 
         async with aiohttp.ClientSession() as session:
+            if album_art_url:
+                state.log(f"Downloading album art: {album_art_url}")
+                async with session.get(album_art_url) as album_art_resp:
+                    state.log(f"Album art response status={album_art_resp.status}")
+                    album_art_resp.raise_for_status()
+                    album_art_data = await album_art_resp.read()
+                    state.log(f"Fetched album art bytes={len(album_art_data)}")
+
+                album_art_format = mutagen.mp4.MP4Cover.FORMAT_JPEG
+                lowered_album_art_url = album_art_url.lower()
+                if lowered_album_art_url.endswith(".png"):
+                    album_art_format = mutagen.mp4.MP4Cover.FORMAT_PNG
+
+                album_art_cover = mutagen.mp4.MP4Cover(album_art_data, imageformat=album_art_format)
+
             for i, track in enumerate(tracks):
                 track_num = i + 1
                 state.log(f"Downloading track {track_num}/{state.total}")
@@ -136,6 +153,8 @@ async def process_job(job_id, payload):
                     audio["\xa9alb"] = [album_title]
                     audio["aART"] = [album_artist]
                     audio["trkn"] = [(track_num, state.total)]
+                    if album_art_cover:
+                        audio["covr"] = [album_art_cover]
 
                     audio.save()
 

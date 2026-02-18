@@ -7,6 +7,7 @@ A small local web app that downloads a playlist of `.m4a` tracks, rewrites MP4 m
 - Accepts playlist JSON from the browser UI (`/`)
 - Downloads each track using the provided `Cookie` and `BaseURL`
 - Tags each file with title/artist/album/track number
+- Optionally embeds album art from a top-level `AlbumArt` URL
 - Uploads each processed track to YouTube Music with `ytmusicapi`
 - Streams job progress and logs while processing
 
@@ -44,6 +45,7 @@ Paste JSON into the UI in this shape:
 {
   "Cookie": "session=...",
   "BaseURL": "https://example.com",
+  "AlbumArt": "https://cdn.example.com/cover.jpg",
   "PlayListsTracks": [
     {
       "m4a": "/path/to/file.mp4",
@@ -61,6 +63,8 @@ Paste JSON into the UI in this shape:
 ## Bookmarklet helper
 
 `bookmarklet.js` builds a URL containing prefilled JSON (`Cookie`, `BaseURL`, `PlayListsTracks`) and opens this app.
+
+If `AlbumArt` is provided in the JSON payload, the backend downloads that image once per job and writes it into each tagged `.m4a` file using Mutagen before upload.
 
 ## Endpoints
 
