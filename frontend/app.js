@@ -6,8 +6,8 @@ function debugLog(...args) {
     console.debug("[ndl-webui]", ...args);
 }
 
-const BACKEND_STORAGE_KEY = "backendBaseUri";
-const ACTIVE_JOB_STORAGE_KEY = "activeJobId";
+const BACKEND_STORAGE_KEY = "ndlytmBackendBaseUri";
+const ACTIVE_JOB_STORAGE_KEY = "ndlytmActiveJobId";
 
 
 function normalizeBackendBaseUri(uri) {
