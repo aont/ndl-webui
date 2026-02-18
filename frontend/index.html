@@ -7,7 +7,7 @@
 </head>
 <body>
 
-<h1>M4A Batch Downloader</h1>
+<h1>YouTube Music Uploader</h1>
 
 <label for="backendBaseUri">Backend Base URI:</label>
 <input id="backendBaseUri" type="url" placeholder="https://api.example.com">
@@ -15,17 +15,13 @@
 
 <textarea id="jsonInput" placeholder="Paste JSON here"></textarea>
 <br>
-<button id="startBtn">Start Download</button>
+<button id="startBtn">Start Upload</button>
 
 <div id="progressSection" style="display:none;">
     <p id="progressText"></p>
     <progress id="progressBar" value="0" max="100"></progress>
     <pre id="logOutput"></pre>
 
-    <div id="downloadSection" style="display:none;">
-        <p>Download ready:</p>
-        <a id="downloadLink" href="#" download="tracks.zip">Download ZIP</a>
-    </div>
 </div>
 
 <script src="app.js"></script>

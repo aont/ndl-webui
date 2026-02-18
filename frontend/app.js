@@ -98,12 +98,16 @@ document.getElementById("startBtn").onclick = async () => {
         body: JSON.stringify(parsed)
     });
 
+    if (!resp.ok) {
+        alert(`Start request failed: ${resp.status}`);
+        return;
+    }
+
     const data = await resp.json();
     debugLog("Start response", { status: resp.status, data });
     currentJobId = data.job_id;
 
     document.getElementById("progressSection").style.display = "block";
-    document.getElementById("downloadSection").style.display = "none";
 
     subscribeProgressStream();
 };
@@ -140,7 +144,7 @@ function updateProgressUI(data) {
 
     document.getElementById("progressBar").value = percent;
     document.getElementById("progressText").innerText =
-        `Progress: ${data.progress} / ${data.total}`;
+        `Progress: ${data.progress} / ${data.total} (uploaded: ${data.uploaded || 0})`;
 
     document.getElementById("logOutput").innerText =
         data.logs.join("\n");
@@ -160,25 +164,10 @@ function updateProgressUI(data) {
             progressEventSource.close();
             progressEventSource = null;
         }
-        showDownloadLink();
+
+        document.getElementById("progressText").innerText =
+            `Upload completed: ${data.uploaded || 0} tracks uploaded to YouTube Music`;
     }
-}
-
-/* ----------------------------------------
-   Prepare ZIP download link
----------------------------------------- */
-
-function showDownloadLink() {
-    const downloadUrl = buildApiUrl(`/download/${currentJobId}`);
-    debugLog("Preparing ZIP download link", { downloadUrl, currentJobId });
-
-    const link = document.getElementById("downloadLink");
-    link.href = downloadUrl;
-
-    document.getElementById("downloadSection").style.display = "block";
-
-    document.getElementById("progressText").innerText =
-        "ZIP ready for download";
 }
 
 /* ----------------------------------------

@@ -5,8 +5,6 @@ import argparse
 import json
 import os
 import re
-import zipfile
-import io
 import uuid
 import tempfile
 import logging
@@ -14,6 +12,7 @@ import logging
 import aiohttp
 from aiohttp import web
 import mutagen.mp4
+from ytmusicapi import YTMusic
 
 
 logging.basicConfig(
@@ -25,6 +24,7 @@ mp4_fn_pat = re.compile(r"/([^/]+)\.mp4")
 catalogname_pat = re.compile(r"(.*)（(.*)）")
 
 jobs = {}
+ytmusic_auth_path = None
 
 
 @web.middleware
@@ -51,7 +51,7 @@ class JobState:
         self.logs = []
         self.done = False
         self.error = None
-        self.zip_data = None
+        self.uploaded = 0
 
     def snapshot(self):
         return {
@@ -59,8 +59,7 @@ class JobState:
             "total": self.total,
             "done": self.done,
             "error": self.error,
-            "zip_ready": self.zip_data is not None,
-            "zip_size": len(self.zip_data) if self.zip_data else 0,
+            "uploaded": self.uploaded,
             "logs": self.logs[-20:],
         }
 
@@ -71,6 +70,11 @@ class JobState:
 
 async def process_job(job_id, payload):
     state = jobs[job_id]
+    if not ytmusic_auth_path:
+        state.error = "YTMusic browser auth path is not configured"
+        state.log("Job failed: YTMusic browser auth path is not configured")
+        return
+
     try:
         cookie = payload["Cookie"]
         base_url = payload["BaseURL"]
@@ -78,35 +82,36 @@ async def process_job(job_id, payload):
 
         state.total = len(tracks)
         state.log(f"Starting job {job_id} with {state.total} tracks")
+        state.log(f"Initializing YTMusic client with browser auth: {ytmusic_auth_path}")
 
-        zip_buffer = io.BytesIO()
+        ytmusic = await asyncio.to_thread(YTMusic, ytmusic_auth_path)
 
         async with aiohttp.ClientSession() as session:
-            with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_STORED) as zf:
-                for i, track in enumerate(tracks):
-                    track_num = i + 1
-                    state.log(f"Downloading track {track_num}/{state.total}")
+            for i, track in enumerate(tracks):
+                track_num = i + 1
+                state.log(f"Downloading track {track_num}/{state.total}")
 
-                    m4a_path = track["m4a"]
-                    match = mp4_fn_pat.search(m4a_path)
-                    if not match:
-                        state.log(f"Invalid m4a path: {m4a_path}")
-                        continue
+                m4a_path = track["m4a"]
+                match = mp4_fn_pat.search(m4a_path)
+                if not match:
+                    state.log(f"Invalid m4a path: {m4a_path}")
+                    continue
 
-                    filename = match.group(1) + ".m4a"
-                    url = base_url + m4a_path
+                filename = match.group(1) + ".m4a"
+                url = base_url + m4a_path
 
-                    headers = {"Cookie": cookie}
-                    state.log(f"Fetching URL: {url}")
-                    async with session.get(url, headers=headers) as resp:
-                        state.log(f"Track response status={resp.status} for {filename}")
-                        data = await resp.read()
-                        state.log(f"Fetched bytes={len(data)} for {filename}")
+                headers = {"Cookie": cookie}
+                state.log(f"Fetching URL: {url}")
+                async with session.get(url, headers=headers) as resp:
+                    state.log(f"Track response status={resp.status} for {filename}")
+                    data = await resp.read()
+                    state.log(f"Fetched bytes={len(data)} for {filename}")
 
-                    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".m4a")
-                    temp.write(data)
-                    temp.close()
+                temp = tempfile.NamedTemporaryFile(delete=False, suffix=".m4a")
+                temp.write(data)
+                temp.close()
 
+                try:
                     state.log(f"Tagging {filename}")
 
                     audio = mutagen.mp4.MP4(temp.name)
@@ -126,16 +131,18 @@ async def process_job(job_id, payload):
 
                     audio.save()
 
-                    zf.write(temp.name, arcname=filename)
+                    state.log(f"Uploading {filename} to YouTube Music")
+                    upload_result = await asyncio.to_thread(ytmusic.upload_song, temp.name)
+                    state.log(f"Upload result for {filename}: {upload_result}")
+                    state.uploaded += 1
+                finally:
                     os.remove(temp.name)
 
-                    state.progress = track_num
-                    state.log(f"Finished {filename}")
+                state.progress = track_num
+                state.log(f"Finished {filename}")
 
-        zip_buffer.seek(0)
-        state.zip_data = zip_buffer.read()
         state.done = True
-        state.log(f"Job completed successfully (zip bytes={len(state.zip_data)})")
+        state.log(f"Job completed successfully (uploaded={state.uploaded})")
     except Exception as exc:
         state.error = str(exc)
         state.log(f"Job failed: {exc}")
@@ -209,33 +216,6 @@ async def stream_progress(request):
     return response
 
 
-async def download_zip(request):
-    job_id = request.match_info["job_id"]
-    state = jobs.get(job_id)
-
-    if not state:
-        logging.warning("Download requested for invalid job_id=%s", job_id)
-        return web.Response(status=404)
-
-    if not state.done:
-        logging.warning("Download requested before job completion: job_id=%s", job_id)
-        return web.Response(status=404)
-
-    if not state.zip_data:
-        logging.error("Download requested but zip_data missing: job_id=%s error=%s", job_id, state.error)
-        return web.Response(status=404)
-
-    logging.info("Serving ZIP for job_id=%s size=%d", job_id, len(state.zip_data))
-
-    return web.Response(
-        body=state.zip_data,
-        headers={
-            "Content-Disposition": "attachment; filename=tracks.zip",
-            "Content-Type": "application/zip"
-        }
-    )
-
-
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -250,18 +230,25 @@ def parse_args():
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging level"
     )
+    parser.add_argument(
+        "--ytmusic-browser-auth",
+        default=None,
+        help="Path to ytmusicapi browser.json auth file"
+    )
     return parser.parse_args()
 
 
 def main():
+    global ytmusic_auth_path
+
     args = parse_args()
     logging.getLogger().setLevel(getattr(logging, args.log_level))
+    ytmusic_auth_path = args.ytmusic_browser_auth
 
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_post("/start", start_job)
     app.router.add_get("/progress/{job_id}", get_progress)
     app.router.add_get("/progress-stream/{job_id}", stream_progress)
-    app.router.add_get("/download/{job_id}", download_zip)
     app.router.add_static("/", path="./frontend", show_index=True)
 
     web.run_app(app, port=args.port)
