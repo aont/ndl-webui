@@ -6,6 +6,7 @@ function debugLog(...args) {
 }
 
 const BACKEND_STORAGE_KEY = "backendBaseUri";
+const ACTIVE_JOB_STORAGE_KEY = "activeJobId";
 
 
 function normalizeBackendBaseUri(uri) {
@@ -41,6 +42,19 @@ function saveBackendBaseUri() {
         return;
     }
     localStorage.setItem(BACKEND_STORAGE_KEY, value);
+}
+
+function saveActiveJobId(jobId) {
+    if (!jobId) {
+        localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+        return;
+    }
+
+    localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, jobId);
+}
+
+function restoreActiveJobId() {
+    return localStorage.getItem(ACTIVE_JOB_STORAGE_KEY);
 }
 
 /* ----------------------------------------
@@ -106,8 +120,11 @@ document.getElementById("startBtn").onclick = async () => {
     const data = await resp.json();
     debugLog("Start response", { status: resp.status, data });
     currentJobId = data.job_id;
+    saveActiveJobId(currentJobId);
 
     document.getElementById("progressSection").style.display = "block";
+    document.getElementById("progressText").innerText =
+        `Job queued${data.queue_position ? ` (position: ${data.queue_position})` : ""}`;
 
     subscribeProgressStream();
 };
@@ -117,6 +134,10 @@ document.getElementById("startBtn").onclick = async () => {
 ---------------------------------------- */
 
 function subscribeProgressStream() {
+    if (!currentJobId) {
+        return;
+    }
+
     if (progressEventSource) {
         progressEventSource.close();
     }
@@ -143,11 +164,16 @@ function updateProgressUI(data) {
         : 0;
 
     document.getElementById("progressBar").value = percent;
-    document.getElementById("progressText").innerText =
-        `Progress: ${data.progress} / ${data.total} (uploaded: ${data.uploaded || 0})`;
+
+    if (data.status === "queued") {
+        document.getElementById("progressText").innerText = "Job is queued and waiting for previous job to complete";
+    } else {
+        document.getElementById("progressText").innerText =
+            `Progress: ${data.progress} / ${data.total} (uploaded: ${data.uploaded || 0})`;
+    }
 
     document.getElementById("logOutput").innerText =
-        data.logs.join("\n");
+        (data.logs || []).join("\n");
 
     if (data.error) {
         if (progressEventSource) {
@@ -156,6 +182,7 @@ function updateProgressUI(data) {
         }
         document.getElementById("progressText").innerText = `Job failed: ${data.error}`;
         debugLog("Job failed", { data });
+        saveActiveJobId(null);
         return;
     }
 
@@ -167,6 +194,60 @@ function updateProgressUI(data) {
 
         document.getElementById("progressText").innerText =
             `Upload completed: ${data.uploaded || 0} tracks uploaded to YouTube Music`;
+        saveActiveJobId(null);
+    }
+}
+
+async function hydrateJobFromServer(jobId) {
+    const progressUrl = buildApiUrl(`/progress/${jobId}`);
+    const resp = await fetch(progressUrl);
+
+    if (!resp.ok) {
+        throw new Error(`Unable to fetch job progress (${resp.status})`);
+    }
+
+    return resp.json();
+}
+
+async function resumeLatestJob() {
+    const savedJobId = restoreActiveJobId();
+    if (savedJobId) {
+        currentJobId = savedJobId;
+        document.getElementById("progressSection").style.display = "block";
+
+        try {
+            const data = await hydrateJobFromServer(savedJobId);
+            updateProgressUI(data);
+            if (!data.done && !data.error) {
+                subscribeProgressStream();
+            }
+            return;
+        } catch (error) {
+            debugLog("Failed to restore saved job", error);
+            saveActiveJobId(null);
+        }
+    }
+
+    try {
+        const jobsResp = await fetch(buildApiUrl("/jobs"));
+        if (!jobsResp.ok) {
+            return;
+        }
+
+        const jobsData = await jobsResp.json();
+        const activeJob = (jobsData.jobs || []).find((job) => !job.done && !job.error);
+
+        if (!activeJob) {
+            return;
+        }
+
+        currentJobId = activeJob.job_id;
+        saveActiveJobId(currentJobId);
+        document.getElementById("progressSection").style.display = "block";
+        updateProgressUI(activeJob);
+        subscribeProgressStream();
+    } catch (error) {
+        debugLog("Failed to hydrate latest jobs list", error);
     }
 }
 
@@ -174,10 +255,11 @@ function updateProgressUI(data) {
    Initialize
 ---------------------------------------- */
 
-window.addEventListener("DOMContentLoaded", () => {
+window.addEventListener("DOMContentLoaded", async () => {
     restoreBackendBaseUri();
 
     document.getElementById("backendBaseUri").addEventListener("change", saveBackendBaseUri);
 
     prefillFromHash();
+    await resumeLatestJob();
 });

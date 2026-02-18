@@ -8,6 +8,7 @@ import re
 import uuid
 import tempfile
 import logging
+from collections import deque
 
 import aiohttp
 from aiohttp import web
@@ -24,6 +25,8 @@ mp4_fn_pat = re.compile(r"/([^/]+)\.mp4")
 catalogname_pat = re.compile(r"(.*)（(.*)）")
 
 jobs = {}
+job_queue = asyncio.Queue()
+job_order = deque(maxlen=200)
 ytmusic_auth_path = None
 
 
@@ -52,6 +55,7 @@ class JobState:
         self.done = False
         self.error = None
         self.uploaded = 0
+        self.status = "queued"
 
     def snapshot(self):
         return {
@@ -60,7 +64,8 @@ class JobState:
             "done": self.done,
             "error": self.error,
             "uploaded": self.uploaded,
-            "logs": self.logs[-20:],
+            "status": self.status,
+            "logs": self.logs[-200:],
         }
 
     def log(self, message):
@@ -70,7 +75,10 @@ class JobState:
 
 async def process_job(job_id, payload):
     state = jobs[job_id]
+    state.status = "running"
+
     if not ytmusic_auth_path:
+        state.status = "failed"
         state.error = "YTMusic browser auth path is not configured"
         state.log("Job failed: YTMusic browser auth path is not configured")
         return
@@ -142,11 +150,35 @@ async def process_job(job_id, payload):
                 state.log(f"Finished {filename}")
 
         state.done = True
+        state.status = "completed"
         state.log(f"Job completed successfully (uploaded={state.uploaded})")
     except Exception as exc:
+        state.status = "failed"
         state.error = str(exc)
         state.log(f"Job failed: {exc}")
         logging.exception("Unhandled exception during job %s", job_id)
+
+
+async def job_worker(app):
+    logging.info("Job worker started")
+    while True:
+        job_id, payload = await job_queue.get()
+        logging.info("Worker picked job_id=%s", job_id)
+        try:
+            await process_job(job_id, payload)
+        finally:
+            job_queue.task_done()
+
+
+async def on_startup(app):
+    app["job_worker_task"] = asyncio.create_task(job_worker(app))
+
+
+async def on_cleanup(app):
+    worker_task = app.get("job_worker_task")
+    if worker_task:
+        worker_task.cancel()
+        await asyncio.gather(worker_task, return_exceptions=True)
 
 
 async def start_job(request):
@@ -154,11 +186,14 @@ async def start_job(request):
     job_id = str(uuid.uuid4())
 
     jobs[job_id] = JobState()
+    job_order.append(job_id)
     logging.info("Received /start request, assigned job_id=%s", job_id)
+    queue_position = job_queue.qsize() + 1
+    jobs[job_id].log(f"Job queued (position={queue_position})")
 
-    asyncio.create_task(process_job(job_id, payload))
+    await job_queue.put((job_id, payload))
 
-    return web.json_response({"job_id": job_id})
+    return web.json_response({"job_id": job_id, "queue_position": queue_position})
 
 
 async def get_progress(request):
@@ -169,6 +204,18 @@ async def get_progress(request):
         return web.json_response({"error": "Invalid job ID"}, status=404)
 
     return web.json_response(state.snapshot())
+
+
+async def list_jobs(request):
+    snapshots = []
+    for job_id in job_order:
+        state = jobs.get(job_id)
+        if not state:
+            continue
+        snapshot = state.snapshot()
+        snapshots.append({"job_id": job_id, **snapshot})
+
+    return web.json_response({"jobs": snapshots})
 
 
 async def stream_progress(request):
@@ -246,7 +293,10 @@ def main():
     ytmusic_auth_path = args.ytmusic_browser_auth
 
     app = web.Application(middlewares=[cors_middleware])
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
     app.router.add_post("/start", start_job)
+    app.router.add_get("/jobs", list_jobs)
     app.router.add_get("/progress/{job_id}", get_progress)
     app.router.add_get("/progress-stream/{job_id}", stream_progress)
     app.router.add_static("/", path="./frontend", show_index=True)
